@@ -24,15 +24,52 @@ class AllLoansScreen extends ConsumerWidget {
           if (loans.isEmpty) {
             return const Center(child: Text('No loans found.'));
           }
+
+          final now = DateTime.now();
+
+          // Helper to calculate the next nearest upcoming EMI date simply (for sorting purposes)
+          DateTime getNextDue(Loan loan) {
+            if (loan.status == LoanStatus.closed) return DateTime(2100); // Push closed way back
+            DateTime target = DateTime(now.year, now.month, loan.dueDayOfMonth);
+            if (target.isBefore(now)) {
+              target = DateTime(now.year, now.month + 1, loan.dueDayOfMonth);
+            }
+            return target;
+          }
+
+          final sortedLoans = List<Loan>.from(loans)
+            ..sort((a, b) {
+              if (a.status != b.status) {
+                return a.status == LoanStatus.active ? -1 : 1;
+              }
+              final dueA = getNextDue(a);
+              final dueB = getNextDue(b);
+              return dueA.compareTo(dueB);
+            });
+
           return ListView.builder(
-            itemCount: loans.length,
+            itemCount: sortedLoans.length,
             padding: const EdgeInsets.all(16.0),
             itemBuilder: (context, index) {
-              final loan = loans[index];
+              final loan = sortedLoans[index];
+
+              IconData getLoanIcon(String type) {
+                final lw = type.toLowerCase();
+                if (lw.contains('home')) return Icons.home_outlined;
+                if (lw.contains('car') || lw.contains('auto')) return Icons.directions_car_outlined;
+                if (lw.contains('education')) return Icons.school_outlined;
+                if (lw.contains('business')) return Icons.business_center_outlined;
+                return Icons.person_outline;
+              }
+
               return Card(
                 margin: const EdgeInsets.only(bottom: 12),
                 child: ListTile(
                   contentPadding: const EdgeInsets.all(16),
+                  leading: CircleAvatar(
+                    backgroundColor: loan.status == LoanStatus.active ? Theme.of(context).colorScheme.primaryContainer : Colors.grey.shade200,
+                    child: Icon(getLoanIcon(loan.loanType), color: loan.status == LoanStatus.active ? Theme.of(context).colorScheme.primary : Colors.grey),
+                  ),
                   title: Text(
                     loan.loanName,
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),

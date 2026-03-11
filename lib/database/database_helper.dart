@@ -199,6 +199,15 @@ CREATE TABLE documents (
     );
   }
 
+  Future<void> deleteUnpaidEmisForLoan(String loanId) async {
+    final db = await instance.database;
+    await db.delete(
+      'emis',
+      where: 'loan_id = ? AND status != ?',
+      whereArgs: [loanId, EmiStatus.paid.name],
+    );
+  }
+
   // --- DOCUMENT CRUD ---
 
   Future<void> insertDocument(Document doc) async {

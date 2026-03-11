@@ -4,10 +4,13 @@ import 'package:uuid/uuid.dart';
 import '../models/loan.dart';
 import '../models/emi.dart';
 import '../providers/loan_provider.dart';
+import '../providers/emi_provider.dart';
+import '../database/database_helper.dart';
 import '../utils/app_utils.dart';
 
 class AddLoanScreen extends ConsumerStatefulWidget {
-  const AddLoanScreen({super.key});
+  final Loan? existingLoan; // If set, we're editing
+  const AddLoanScreen({super.key, this.existingLoan});
 
   @override
   ConsumerState<AddLoanScreen> createState() => _AddLoanScreenState();
@@ -15,7 +18,7 @@ class AddLoanScreen extends ConsumerStatefulWidget {
 
 class _AddLoanScreenState extends ConsumerState<AddLoanScreen> {
   final _formKey = GlobalKey<FormState>();
-  
+
   final _lenderController = TextEditingController();
   final _loanNameController = TextEditingController();
   final _amountController = TextEditingController();
@@ -27,10 +30,31 @@ class _AddLoanScreenState extends ConsumerState<AddLoanScreen> {
   String _loanType = 'Personal';
   DateTime _startDate = DateTime.now();
   int _dueDay = 1;
-  
-  final List<String> _loanTypes = ['Personal', 'Home', 'Auto', 'Education', 'Business', 'Other'];
 
-  bool _isCalculating = false;
+  final List<String> _loanTypes = ['Personal', 'Home', 'Auto', 'Education', 'Business', 'Other'];
+  bool _isSaving = false;
+  bool get _isEditing => widget.existingLoan != null;
+
+  @override
+  void initState() {
+    super.initState();
+    // Pre-fill if editing
+    final loan = widget.existingLoan;
+    if (loan != null) {
+      _lenderController.text = loan.lenderName;
+      _loanNameController.text = loan.loanName;
+      _amountController.text = loan.loanAmount > 0 ? loan.loanAmount.toString() : '';
+      _rateController.text = loan.interestRate > 0 ? loan.interestRate.toString() : '';
+      _tenureController.text = loan.totalMonths.toString();
+      _emiController.text = loan.emiAmount.toString();
+      _notesController.text = loan.notes;
+      _loanType = loan.loanType;
+      _startDate = loan.startDate;
+      _dueDay = loan.dueDayOfMonth;
+    } else {
+      _dueDay = DateTime.now().day;
+    }
+  }
 
   @override
   void dispose() {
@@ -45,15 +69,14 @@ class _AddLoanScreenState extends ConsumerState<AddLoanScreen> {
   }
 
   void _calculateEmi() {
-    final amount = double.tryParse(_amountController.text) ?? 0.0;
-    final rate = double.tryParse(_rateController.text) ?? 0.0;
-    final tenure = int.tryParse(_tenureController.text) ?? 0;
+    final emi = double.tryParse(_emiController.text);
+    final tenure = int.tryParse(_tenureController.text);
 
-    if (amount > 0 && tenure > 0) {
-      final calculatedEmi = AppUtils.calculateEMI(amount, rate, tenure);
-      setState(() {
-        _emiController.text = calculatedEmi.toStringAsFixed(2);
-      });
+    if (emi != null && tenure != null) {
+      final loanAmount = emi * tenure;
+      _amountController.text = loanAmount.toStringAsFixed(2);
+    } else {
+      _amountController.clear();
     }
   }
 
@@ -67,203 +90,262 @@ class _AddLoanScreenState extends ConsumerState<AddLoanScreen> {
     if (picked != null && picked != _startDate) {
       setState(() {
         _startDate = picked;
-        _dueDay = picked.day; // Default due day to start date day
+        _dueDay = picked.day;
       });
     }
   }
 
-  Future<void> _saveLoan() async {
+  Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    
-    setState(() => _isCalculating = true);
+    setState(() => _isSaving = true);
 
     try {
-      final amount = double.parse(_amountController.text);
+      final amount = double.tryParse(_amountController.text) ?? 0.0;
       final rate = double.tryParse(_rateController.text) ?? 0.0;
-      final tenure = int.parse(_tenureController.text);
-      final emiAmount = double.parse(_emiController.text);
+      final tenure = int.tryParse(_tenureController.text) ?? 0;
+      final emiAmount = double.tryParse(_emiController.text) ?? 0.0;
 
-      final loanId = const Uuid().v4();
-      
-      final loan = Loan(
-        id: loanId,
-        lenderName: _lenderController.text,
-        loanName: _loanNameController.text,
-        loanType: _loanType,
-        loanAmount: amount,
-        emiAmount: emiAmount,
-        interestRate: rate,
-        totalMonths: tenure,
-        remainingMonths: tenure, // Initially, remaining equals total
-        startDate: _startDate,
-        dueDayOfMonth: _dueDay,
-        notes: _notesController.text,
-        status: LoanStatus.active,
-        createdAt: DateTime.now(),
-      );
+      if (_isEditing) {
+        // --- UPDATE LOAN ---
+        final updatedLoan = widget.existingLoan!.copyWith(
+          lenderName: _lenderController.text,
+          loanName: _loanNameController.text,
+          loanType: _loanType,
+          loanAmount: amount,
+          emiAmount: emiAmount,
+          interestRate: rate,
+          totalMonths: tenure,
+          startDate: _startDate,
+          dueDayOfMonth: _dueDay,
+          notes: _notesController.text,
+        );
+        await ref.read(loanListProvider.notifier).updateLoan(updatedLoan);
 
-      // Save Loan
-      await ref.read(loanListProvider.notifier).addLoan(loan);
+        // Regenerate unpaid EMIs to reflect new tenure / amounts
+        final db = DatabaseHelper.instance;
+        await db.deleteUnpaidEmisForLoan(updatedLoan.id);
+        final existingEmis = await db.getEmisForLoan(updatedLoan.id);
+        final int paidCount = existingEmis.where((e) => e.status == EmiStatus.paid).length;
 
-      // Generate EMIs
-      final List<Emi> generatedEmis = [];
-      DateTime nextDueDate = DateTime(_startDate.year, _startDate.month, _dueDay);
-      // If start date is same as due date and it has passed for the first month, we usually start from next month
-      // For simplicity, we just generate monthly from start
-      for (int i = 1; i <= tenure; i++) {
-        // Increment month by i
-        DateTime dueDate = DateTime(nextDueDate.year, nextDueDate.month + i, nextDueDate.day);
-        
-        generatedEmis.add(Emi(
-          id: const Uuid().v4(),
-          loanId: loanId,
-          emiNumber: i,
-          dueDate: dueDate,
-          amount: emiAmount,
-          status: EmiStatus.pending,
-        ));
-      }
+        if (tenure > paidCount) {
+          final List<Emi> newEmis = [];
+          for (int i = paidCount + 1; i <= tenure; i++) {
+            final dueDate = DateTime(_startDate.year, _startDate.month + i, _dueDay);
+            newEmis.add(Emi(
+              id: const Uuid().v4(),
+              loanId: updatedLoan.id,
+              emiNumber: i,
+              dueDate: dueDate,
+              amount: emiAmount,
+              status: EmiStatus.pending,
+            ));
+          }
+          await db.insertEmis(newEmis);
+        }
 
-      await ref.read(databaseHelperProvider).insertEmis(generatedEmis);
+        ref.invalidate(allEmisProvider);
+        ref.read(upcomingEmiProvider.notifier).loadUpcomingEmis();
 
-      if (mounted) {
-         ScaffoldMessenger.of(context).showSnackBar(
-           const SnackBar(content: Text('Loan added successfully!')),
-         );
-         Navigator.pop(context);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Loan updated!')));
+          Navigator.pop(context, updatedLoan);
+        }
+      } else {
+        // --- ADD LOAN ---
+        final loanId = const Uuid().v4();
+        final loan = Loan(
+          id: loanId,
+          lenderName: _lenderController.text,
+          loanName: _loanNameController.text,
+          loanType: _loanType,
+          loanAmount: amount,
+          emiAmount: emiAmount,
+          interestRate: rate,
+          totalMonths: tenure,
+          remainingMonths: tenure,
+          startDate: _startDate,
+          dueDayOfMonth: _dueDay,
+          notes: _notesController.text,
+          status: LoanStatus.active,
+          createdAt: DateTime.now(),
+        );
+
+        await ref.read(loanListProvider.notifier).addLoan(loan);
+
+        // Generate EMIs
+        final List<Emi> generatedEmis = [];
+        for (int i = 1; i <= tenure; i++) {
+          final dueDate = DateTime(_startDate.year, _startDate.month + i, _dueDay);
+          generatedEmis.add(Emi(
+            id: const Uuid().v4(),
+            loanId: loanId,
+            emiNumber: i,
+            dueDate: dueDate,
+            amount: emiAmount,
+            status: EmiStatus.pending,
+          ));
+        }
+        await DatabaseHelper.instance.insertEmis(generatedEmis);
+        // Refresh providers
+        ref.invalidate(allEmisProvider);
+        ref.read(upcomingEmiProvider.notifier).loadUpcomingEmis();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Loan added & EMI schedule generated!')));
+          Navigator.pop(context);
+        }
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error adding loan: $e')),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     } finally {
-      if (mounted) setState(() => _isCalculating = false);
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Add Loan'),
+        title: Text(_isEditing ? 'Edit Loan' : 'Add New Loan'),
       ),
-      body: _isCalculating 
-        ? const Center(child: CircularProgressIndicator())
-        : Form(
-          key: _formKey,
-          child: ListView(
-            padding: const EdgeInsets.all(16.0),
-            children: [
-              TextFormField(
-                controller: _loanNameController,
-                decoration: const InputDecoration(labelText: 'Loan Title (e.g., Car Loan)'),
-                validator: (val) => val == null || val.isEmpty ? 'Please enter loan title' : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _lenderController,
-                decoration: const InputDecoration(labelText: 'Lender / Bank Name'),
-                validator: (val) => val == null || val.isEmpty ? 'Please enter lender name' : null,
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                initialValue: _loanType,
-                decoration: const InputDecoration(labelText: 'Loan Type'),
-                items: _loanTypes.map((type) {
-                  return DropdownMenuItem(value: type, child: Text(type));
-                }).toList(),
-                onChanged: (val) {
-                  if (val != null) setState(() => _loanType = val);
-                },
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _amountController,
-                decoration: const InputDecoration(labelText: 'Loan Amount (Principal)'),
-                keyboardType: TextInputType.number,
-                onChanged: (_) => _calculateEmi(),
-                validator: (val) => val == null || val.isEmpty ? 'Please enter amount' : null,
-              ),
-              const SizedBox(height: 16),
-              Row(
+      body: _isSaving
+          ? const Center(child: CircularProgressIndicator())
+          : Form(
+              key: _formKey,
+              child: ListView(
+                padding: const EdgeInsets.all(16.0),
                 children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _rateController,
-                      decoration: const InputDecoration(labelText: 'Interest Rate (% p.a.)'),
-                      keyboardType: TextInputType.number,
-                      onChanged: (_) => _calculateEmi(),
+                  _sectionHeader(context, 'Basic Information', Icons.info_outline),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _loanNameController,
+                    decoration: const InputDecoration(labelText: 'Loan Title *', hintText: 'e.g. Car Loan'),
+                    validator: (v) => v == null || v.isEmpty ? 'Required' : null,
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _lenderController,
+                    decoration: const InputDecoration(labelText: 'Lender / Bank Name', hintText: 'Optional'),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    initialValue: _loanType,
+                    decoration: const InputDecoration(labelText: 'Loan Type'),
+                    items: _loanTypes.map((type) => DropdownMenuItem(value: type, child: Text(type))).toList(),
+                    onChanged: (val) { if (val != null) setState(() => _loanType = val); },
+                  ),
+                  const SizedBox(height: 24),
+                  _sectionHeader(context, 'Financial Details', Icons.account_balance_wallet_outlined),
+                  const SizedBox(height: 4),
+                  // Helper text
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'Enter EMI directly, or fill Amount + Rate + Tenure to auto-calculate.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurface.withValues(alpha: 0.6)),
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _tenureController,
-                      decoration: const InputDecoration(labelText: 'Tenure (Months)'),
-                      keyboardType: TextInputType.number,
-                      onChanged: (_) => _calculateEmi(),
-                      validator: (val) => val == null || val.isEmpty ? 'Enter tenure' : null,
-                    ),
+                  TextFormField(
+                    controller: _amountController,
+                    decoration: const InputDecoration(labelText: 'Loan Amount (Calculated)', hintText: 'Auto-fills based on EMI * Tenure'),
+                    readOnly: true,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
                   ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _emiController,
-                decoration: InputDecoration(
-                  labelText: 'Monthly EMI Amount',
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.calculate),
-                    onPressed: _calculateEmi,
-                    tooltip: 'Calculate EMI',
-                  ),
-                ),
-                keyboardType: TextInputType.number,
-                validator: (val) => val == null || val.isEmpty ? 'Enter EMI amount' : null,
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: InkWell(
-                      onTap: () => _selectDate(context),
-                      child: InputDecorator(
-                        decoration: const InputDecoration(labelText: 'Start Date'),
-                        child: Text(AppUtils.formatDate(_startDate)),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _rateController,
+                          decoration: const InputDecoration(labelText: 'Interest Rate (% p.a.)', hintText: 'Optional'),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          onChanged: (_) => _calculateEmi(),
+                        ),
                       ),
-                    ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: TextFormField(
+                          controller: _tenureController,
+                          decoration: const InputDecoration(labelText: 'Tenure (Months) *'),
+                          keyboardType: TextInputType.number,
+                          onChanged: (_) => _calculateEmi(),
+                          validator: (v) => v == null || v.isEmpty ? 'Required' : null,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: DropdownButtonFormField<int>(
-                       initialValue: _dueDay,
-                       decoration: const InputDecoration(labelText: 'Due Day'),
-                       items: List.generate(31, (index) => index + 1).map((day) {
-                         return DropdownMenuItem(value: day, child: Text(day.toString()));
-                       }).toList(),
-                       onChanged: (val) {
-                         if (val != null) setState(() => _dueDay = val);
-                       },
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _emiController,
+                    decoration: const InputDecoration(
+                      labelText: 'Monthly EMI Amount (₹) *',
+                      hintText: 'Enter EMI amount',
                     ),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    onChanged: (_) => _calculateEmi(),
+                    validator: (v) => v == null || v.isEmpty ? 'Required' : null,
                   ),
+                  const SizedBox(height: 24),
+                  _sectionHeader(context, 'Schedule', Icons.calendar_today_outlined),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          onTap: () => _selectDate(context),
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'Start Date',
+                              suffixIcon: Icon(Icons.edit_calendar),
+                            ),
+                            child: Text(AppUtils.formatDate(_startDate)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: DropdownButtonFormField<int>(
+                          initialValue: _dueDay,
+                          decoration: const InputDecoration(labelText: 'EMI Due Day'),
+                          items: List.generate(28, (i) => i + 1)
+                              .map((d) => DropdownMenuItem(value: d, child: Text('$d')))
+                              .toList(),
+                          onChanged: (val) { if (val != null) setState(() => _dueDay = val); },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _notesController,
+                    decoration: const InputDecoration(labelText: 'Notes (Optional)', hintText: 'Any additional info...'),
+                    maxLines: 3,
+                  ),
+                  const SizedBox(height: 32),
+                  ElevatedButton.icon(
+                    onPressed: _save,
+                    icon: Icon(_isEditing ? Icons.save : Icons.add_circle_outline),
+                    label: Text(_isEditing ? 'Update Loan' : 'Save & Generate EMI Schedule'),
+                    style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(52)),
+                  ),
+                  const SizedBox(height: 24),
                 ],
               ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _notesController,
-                decoration: const InputDecoration(labelText: 'Notes (Optional)'),
-                maxLines: 2,
-              ),
-              const SizedBox(height: 32),
-              ElevatedButton(
-                onPressed: _saveLoan,
-                child: const Text('Save Loan & Generate EMIs'),
-              ),
-            ],
-          ),
-        ),
+            ),
+    );
+  }
+
+  Widget _sectionHeader(BuildContext context, String title, IconData icon) {
+    final cs = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: cs.primary),
+        const SizedBox(width: 8),
+        Text(title, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: cs.primary, fontWeight: FontWeight.bold)),
+        const SizedBox(width: 8),
+        Expanded(child: Divider(color: cs.primary.withValues(alpha: 0.3))),
+      ],
     );
   }
 }

@@ -43,26 +43,7 @@ class SettingsScreen extends ConsumerWidget {
               );
             },
           ),
-          ListTile(
-            leading: const Icon(Icons.backup),
-            title: const Text('Backup Data'),
-            subtitle: const Text('Save your database locally'),
-            onTap: () {
-               ScaffoldMessenger.of(context).showSnackBar(
-                 const SnackBar(content: Text('Backup created successfully!')),
-               );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.restore),
-            title: const Text('Restore Data'),
-            subtitle: const Text('Restore from a local backup file'),
-            onTap: () {
-               ScaffoldMessenger.of(context).showSnackBar(
-                 const SnackBar(content: Text('Select backup file to restore...')),
-               );
-            },
-          ),
+
           const Divider(),
           const ListTile(
             title: Text('About', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
