@@ -77,12 +77,13 @@ class AllLoansScreen extends ConsumerWidget {
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const SizedBox(height: 8),
-                      Text('Lender: ${loan.lenderName}'),
+                      const SizedBox(height: 6),
+                      Text('${AppUtils.formatCurrency(loan.loanAmount > 0 ? loan.loanAmount : loan.emiAmount * loan.totalMonths)} · ${loan.interestRate}% p.a.', style: const TextStyle(fontWeight: FontWeight.w500)),
                       const SizedBox(height: 4),
-                      Text('Amount: ${AppUtils.formatCurrency(loan.loanAmount)}'),
-                      const SizedBox(height: 4),
-                      Text('EMI: ${AppUtils.formatCurrency(loan.emiAmount)} (${loan.remainingMonths}/${loan.totalMonths} remaining)'),
+                      if (loan.status == LoanStatus.active)
+                        Text('Next EMI: ${AppUtils.formatCurrency(loan.emiAmount)} on ${AppUtils.formatDate(getNextDue(loan))}', style: const TextStyle(color: Colors.grey, fontSize: 12))
+                      else
+                        const Text('Fully Paid ✅', style: TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold)),
                     ],
                   ),
                   trailing: Chip(

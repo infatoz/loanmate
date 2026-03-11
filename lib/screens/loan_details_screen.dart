@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +6,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:open_file/open_file.dart';
+import 'package:screenshot/screenshot.dart';
+import 'package:share_plus/share_plus.dart';
+
 import '../models/loan.dart';
 import '../models/emi.dart';
 import '../providers/loan_provider.dart';
@@ -26,6 +30,7 @@ class LoanDetailsScreen extends ConsumerStatefulWidget {
 
 class _LoanDetailsScreenState extends ConsumerState<LoanDetailsScreen> {
   late Loan _currentLoan;
+  final ScreenshotController _screenshotController = ScreenshotController();
 
   @override
   void initState() {
@@ -53,9 +58,14 @@ class _LoanDetailsScreenState extends ConsumerState<LoanDetailsScreen> {
             },
           ),
           IconButton(
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Share Screenshot',
+            onPressed: () => _shareScreenshot(),
+          ),
+          IconButton(
             icon: const Icon(Icons.picture_as_pdf_outlined),
             tooltip: 'Export PDF',
-            onPressed: () => _exportPdf(emisAsync),
+            onPressed: () => _exportPdf(),
           ),
           PopupMenuButton<String>(
             onSelected: (val) {
@@ -73,19 +83,25 @@ class _LoanDetailsScreenState extends ConsumerState<LoanDetailsScreen> {
       body: emisAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, st) => Center(child: Text('Error: $e')),
-        data: (emis) => SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildSummary(context, emis),
-              const SizedBox(height: 20),
-              _buildProgressCard(context, emis),
-              const SizedBox(height: 20),
-              Text('EMI Schedule', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
-              _buildEmiList(context, emis),
-            ],
+        data: (emis) => Screenshot(
+          controller: _screenshotController,
+          child: Container(
+            color: Theme.of(context).scaffoldBackgroundColor, // Ensure solid background for screenshot
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSummary(context, emis),
+                  const SizedBox(height: 20),
+                  _buildProgressCard(context, emis),
+                  const SizedBox(height: 20),
+                  Text('EMI Schedule', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  _buildEmiList(context, emis),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -307,55 +323,47 @@ class _LoanDetailsScreenState extends ConsumerState<LoanDetailsScreen> {
     }
   }
 
-  Future<void> _exportPdf(AsyncValue<List<Emi>> emisAsync) async {
-    final emis = emisAsync.asData?.value ?? [];
+  Future<void> _shareScreenshot() async {
     try {
-      final pdf = pw.Document();
-      final loan = _currentLoan;
-      final paidEmis = emis.where((e) => e.status == EmiStatus.paid).toList();
-      final totalPaid = paidEmis.fold(0.0, (s, e) => s + e.amount);
+      final Uint8List? image = await _screenshotController.capture(delay: const Duration(milliseconds: 100));
+      if (image == null) return;
 
-      pdf.addPage(pw.MultiPage(
+      final dir = await getApplicationDocumentsDirectory();
+      final imagePath = '${dir.path}/loan_${_currentLoan.loanName.replaceAll(' ', '_')}.png';
+      final file = File(imagePath);
+      await file.writeAsBytes(image);
+
+      await Share.shareXFiles([XFile(imagePath)], text: 'Loan details for ${_currentLoan.loanName}');
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Share error: $e')));
+    }
+  }
+
+  Future<void> _exportPdf() async {
+    try {
+      // Capture the screen as an image
+      final Uint8List? imageBytes = await _screenshotController.capture(delay: const Duration(milliseconds: 100));
+      if (imageBytes == null) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not capture screen.')));
+        return;
+      }
+
+      final pdf = pw.Document();
+      final image = pw.MemoryImage(imageBytes);
+
+      // Embed image into a single page PDF, scaling to fit
+      pdf.addPage(pw.Page(
         pageFormat: PdfPageFormat.a4,
-        build: (pw.Context ctx) => [
-          pw.Header(level: 0, child: pw.Text('LoanMate – Loan Report', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold))),
-          pw.SizedBox(height: 12),
-          pw.Text('Loan: ${loan.loanName}', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-          pw.Text('Lender: ${loan.lenderName}'),
-          pw.Text('Type: ${loan.loanType}'),
-          pw.Text('Principal: ${AppUtils.formatCurrency(loan.loanAmount)}'),
-          pw.Text('EMI: ${AppUtils.formatCurrency(loan.emiAmount)} / month'),
-          pw.Text('Tenure: ${loan.totalMonths} months'),
-          pw.Text('Interest Rate: ${loan.interestRate}% p.a.'),
-          pw.Text('Status: ${loan.status.name.toUpperCase()}'),
-          pw.Text('Start Date: ${AppUtils.formatDate(loan.startDate)}'),
-          pw.SizedBox(height: 16),
-          pw.Text('Total Paid: ${AppUtils.formatCurrency(totalPaid)}'),
-          pw.Text('Remaining: ${AppUtils.formatCurrency((loan.emiAmount * loan.remainingMonths))}'),
-          pw.SizedBox(height: 20),
-          pw.Text('EMI Schedule', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 8),
-          pw.TableHelper.fromTextArray(
-            headers: ['#', 'Due Date', 'Amount', 'Status', 'Payment Date'],
-            data: emis.map((e) => [
-              '${e.emiNumber}',
-              AppUtils.formatDate(e.dueDate),
-              AppUtils.formatCurrency(e.amount),
-              e.status.name.toUpperCase(),
-              e.paymentDate != null ? AppUtils.formatDate(e.paymentDate!) : '-',
-            ]).toList(),
-            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-            cellStyle: const pw.TextStyle(fontSize: 10),
-          ),
-        ],
+        margin: const pw.EdgeInsets.all(20),
+        build: (pw.Context ctx) => pw.Center(child: pw.Image(image)),
       ));
 
       final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/loan_${loan.loanName.replaceAll(' ', '_')}_report.pdf');
+      final file = File('${dir.path}/loan_${_currentLoan.loanName.replaceAll(' ', '_')}_report.pdf');
       await file.writeAsBytes(await pdf.save());
 
       await OpenFile.open(file.path);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF saved to ${file.path}')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF saved!')));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF error: $e')));
     }

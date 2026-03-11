@@ -9,6 +9,7 @@ import '../models/emi.dart';
 import '../core/app_colors.dart';
 import 'add_loan_screen.dart';
 import 'settings_screen.dart';
+import 'loan_details_screen.dart';
 
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
@@ -63,7 +64,7 @@ class DashboardScreen extends ConsumerWidget {
                   const SizedBox(height: 20),
                   _buildChartsSection(context, loans, allEmisAsync),
                   const SizedBox(height: 20),
-                  _buildUpcomingSection(context, upcomingEmiState),
+                  _buildUpcomingSection(context, upcomingEmiState, ref),
                 ],
               ),
             );
@@ -289,7 +290,7 @@ class DashboardScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildUpcomingSection(BuildContext context, AsyncValue<List<Emi>> upcomingEmiState) {
+  Widget _buildUpcomingSection(BuildContext context, AsyncValue<List<Emi>> upcomingEmiState, WidgetRef ref) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -299,7 +300,17 @@ class DashboardScreen extends ConsumerWidget {
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (err, _) => Text('Error: $err'),
           data: (emis) {
-            if (emis.isEmpty) {
+            // Filter out purely paid EMIs and group by loanId to find the single next earliest EMI per loan
+            final upcoming = emis.where((e) => e.status != EmiStatus.paid).toList();
+            final Map<String, Emi> nextEmiPerLoan = {};
+            for (var e in upcoming) {
+              if (!nextEmiPerLoan.containsKey(e.loanId) || e.dueDate.isBefore(nextEmiPerLoan[e.loanId]!.dueDate)) {
+                nextEmiPerLoan[e.loanId] = e;
+              }
+            }
+            final sortedNextEmis = nextEmiPerLoan.values.toList()..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+
+            if (sortedNextEmis.isEmpty) {
               return Card(
                 child: Padding(
                   padding: const EdgeInsets.all(20),
@@ -316,9 +327,15 @@ class DashboardScreen extends ConsumerWidget {
             return ListView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: emis.length > 5 ? 5 : emis.length,
+              itemCount: sortedNextEmis.length > 5 ? 5 : sortedNextEmis.length,
               itemBuilder: (context, index) {
-                final emi = emis[index];
+                final emi = sortedNextEmis[index];
+                
+                // Retrieve the loan object for name and navigation
+                final loansState = ref.watch(loanListProvider);
+                final loanList = loansState.asData?.value ?? [];
+                final parentLoan = loanList.firstWhere((l) => l.id == emi.loanId, orElse: () => Loan(id: '', lenderName: '', loanName: 'Unknown Loan', loanType: '', loanAmount: 0, emiAmount: 0, interestRate: 0, totalMonths: 0, remainingMonths: 0, startDate: DateTime.now(), dueDayOfMonth: 1, notes: '', status: LoanStatus.active, createdAt: DateTime.now()));
+                
                 final isOverdue = emi.status == EmiStatus.overdue;
                 final daysUntil = emi.dueDate.difference(DateTime.now()).inDays;
                 return Card(
@@ -329,8 +346,19 @@ class DashboardScreen extends ConsumerWidget {
                       child: Icon(isOverdue ? Icons.warning_amber : Icons.schedule,
                           color: isOverdue ? Colors.red : Colors.orange, size: 20),
                     ),
-                    title: Text(AppUtils.formatCurrency(emi.amount), style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text(AppUtils.formatDate(emi.dueDate)),
+                    title: Text(parentLoan.loanName, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('EMI #${emi.emiNumber} · ${AppUtils.formatCurrency(emi.amount)}'),
+                        Text(AppUtils.formatDate(emi.dueDate), style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                      ],
+                    ),
+                    onTap: () {
+                      if (parentLoan.id.isNotEmpty) {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => LoanDetailsScreen(loanId: parentLoan.id, loan: parentLoan)));
+                      }
+                    },
                     trailing: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.end,

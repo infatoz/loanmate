@@ -144,6 +144,7 @@ class _AddLoanScreenState extends ConsumerState<AddLoanScreen> {
         }
 
         ref.invalidate(allEmisProvider);
+        ref.invalidate(emisForLoanProvider(updatedLoan.id));
         ref.read(upcomingEmiProvider.notifier).loadUpcomingEmis();
 
         if (mounted) {

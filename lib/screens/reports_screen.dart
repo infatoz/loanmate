@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +7,9 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:open_file/open_file.dart';
+import 'package:screenshot/screenshot.dart';
+import 'package:share_plus/share_plus.dart';
+
 import '../providers/loan_provider.dart';
 import '../providers/emi_provider.dart';
 import '../models/loan.dart';
@@ -13,11 +17,18 @@ import '../models/emi.dart';
 import '../utils/app_utils.dart';
 import '../core/app_colors.dart';
 
-class ReportsScreen extends ConsumerWidget {
+class ReportsScreen extends ConsumerStatefulWidget {
   const ReportsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ReportsScreen> createState() => _ReportsScreenState();
+}
+
+class _ReportsScreenState extends ConsumerState<ReportsScreen> {
+  final ScreenshotController _screenshotController = ScreenshotController();
+
+  @override
+  Widget build(BuildContext context) {
     final loanState = ref.watch(loanListProvider);
     final allEmisAsync = ref.watch(allEmisProvider);
 
@@ -25,6 +36,11 @@ class ReportsScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Financial Reports'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Share Screenshot',
+            onPressed: () => _shareScreenshot(context),
+          ),
           IconButton(
             icon: const Icon(Icons.picture_as_pdf),
             tooltip: 'Export Summary PDF',
@@ -62,8 +78,12 @@ class ReportsScreen extends ConsumerWidget {
 
     final activeLoans = loans.where((l) => l.status == LoanStatus.active).toList();
 
-    return ListView(
-      padding: const EdgeInsets.all(16),
+    return Screenshot(
+      controller: _screenshotController,
+      child: Container(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
       children: [
         // === FINANCIAL HEALTH CARD ===
         _buildHealthCard(context, totalPaid, totalPayable, overdueCount),
@@ -207,8 +227,10 @@ class ReportsScreen extends ConsumerWidget {
           ),
         ),
       ],
-    );
-  }
+    ),
+  ),
+);
+}
 
   Widget _buildHealthCard(BuildContext context, double totalPaid, double totalPayable, int overdueCount) {
     final pct = totalPayable > 0 ? (totalPaid / totalPayable * 100) : 0;
@@ -402,52 +424,57 @@ class ReportsScreen extends ConsumerWidget {
   }
 
 
-  Future<void> _exportSummaryPdf(BuildContext context, AsyncValue<List<Loan>> loanState, AsyncValue<List<Emi>> allEmisAsync) async {
-    final loans = loanState.asData?.value ?? [];
-    final emis = allEmisAsync.asData?.value ?? [];
+  Future<void> _shareScreenshot(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
     try {
+      final Uint8List? image = await _screenshotController.capture(delay: const Duration(milliseconds: 100));
+      if (image == null) return;
+
+      final dir = await getApplicationDocumentsDirectory();
+      final imagePath = '${dir.path}/financial_report.png';
+      final file = File(imagePath);
+      await file.writeAsBytes(image);
+
+      await Share.shareXFiles([XFile(imagePath)], text: 'LoanMate Financial Report');
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(content: Text('Share error: $e')));
+      }
+    }
+  }
+
+  Future<void> _exportSummaryPdf(BuildContext context, AsyncValue<List<Loan>> loanState, AsyncValue<List<Emi>> allEmisAsync) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final Uint8List? imageBytes = await _screenshotController.capture(delay: const Duration(milliseconds: 100));
+      if (imageBytes == null) {
+        if (mounted) {
+          messenger.showSnackBar(const SnackBar(content: Text('Could not capture screen.')));
+        }
+        return;
+      }
+
       final pdf = pw.Document();
-      final totalPaid = emis.where((e) => e.status == EmiStatus.paid).fold(0.0, (s, e) => s + e.amount);
-      final totalPayable = loans.fold(0.0, (s, l) => s + (l.emiAmount * l.totalMonths));
+      final image = pw.MemoryImage(imageBytes);
 
       pdf.addPage(pw.Page(
         pageFormat: PdfPageFormat.a4,
-        build: (ctx) => pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
-          children: [
-            pw.Text('LoanMate – Financial Summary', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold)),
-            pw.SizedBox(height: 16),
-            pw.Text('Total Loans: ${loans.length}'),
-            pw.Text('Total Principal: ${AppUtils.formatCurrency(loans.fold(0.0, (s, l) => s + (l.loanAmount > 0 ? l.loanAmount : l.emiAmount * l.totalMonths)))}'),
-            pw.Text('Total Payable: ${AppUtils.formatCurrency(totalPayable)}'),
-            pw.Text('Total Paid: ${AppUtils.formatCurrency(totalPaid)}'),
-            pw.Text('Remaining: ${AppUtils.formatCurrency(totalPayable - totalPaid)}'),
-            pw.SizedBox(height: 20),
-            pw.Text('Loans', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-            pw.SizedBox(height: 8),
-            pw.TableHelper.fromTextArray(
-              headers: ['Loan', 'Lender', 'Amount', 'EMI', 'Remaining', 'Status'],
-              data: loans.map((l) => [
-                l.loanName, l.lenderName,
-                AppUtils.formatCurrency(l.loanAmount > 0 ? l.loanAmount : l.emiAmount * l.totalMonths),
-                AppUtils.formatCurrency(l.emiAmount),
-                '${l.remainingMonths} months',
-                l.status.name.toUpperCase(),
-              ]).toList(),
-              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-              cellStyle: const pw.TextStyle(fontSize: 9),
-            ),
-          ],
-        ),
+        margin: const pw.EdgeInsets.all(20),
+        build: (ctx) => pw.Center(child: pw.Image(image)),
       ));
 
       final dir = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/loanmate_summary_report.pdf');
       await file.writeAsBytes(await pdf.save());
+      
       await OpenFile.open(file.path);
-      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('PDF saved!')));
+      if (mounted) {
+        messenger.showSnackBar(const SnackBar(content: Text('PDF saved!')));
+      }
     } catch (e) {
-      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
     }
   }
 }
